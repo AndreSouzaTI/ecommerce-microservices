@@ -1,0 +1,87 @@
+x-service: &service
+  restart: on-failure
+  environment: &service-env
+    EUREKA_URL: http://discovery-server:8761/eureka
+    RABBITMQ_HOST: rabbitmq
+    DB_USERNAME: ecommerce
+    DB_PASSWORD: ecommerce
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ecommerce
+      POSTGRES_PASSWORD: ecommerce
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecommerce"]
+      interval: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      retries: 10
+
+  discovery-server:
+    build:
+      context: .
+      args:
+        SERVICE: discovery-server
+    ports:
+      - "8761:8761"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8761/actuator/health || wget -qO- http://localhost:8761/ > /dev/null"]
+      interval: 10s
+      retries: 12
+
+  catalog-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: catalog-service
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://postgres:5432/catalog
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+
+  order-service:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: order-service
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://postgres:5432/orders
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+
+  api-gateway:
+    <<: *service
+    build:
+      context: .
+      args:
+        SERVICE: api-gateway
+    ports:
+      - "8080:8080"
+    depends_on:
+      discovery-server:
+        condition: service_healthy
