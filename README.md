@@ -7,110 +7,110 @@
 ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-4-FF6600?logo=rabbitmq)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)
 
-Plataforma de e-commerce em **arquitetura de microsserviços** com Spring Cloud: service discovery, API Gateway, comunicação síncrona com circuit breaker e comunicação assíncrona orientada a eventos com RabbitMQ.
+E-commerce platform built on a **microservices architecture** with Spring Cloud: service discovery, an API Gateway, synchronous communication protected by a circuit breaker, and asynchronous event-driven communication with RabbitMQ.
 
-O fluxo de pedido é implementado como uma **saga coreografada**: o pedido nasce `PENDING`, o catálogo reserva o estoque de forma assíncrona e responde com um evento que confirma ou rejeita o pedido. Nenhum serviço acessa o banco do outro.
+The order flow is implemented as a **choreographed saga**: an order starts as `PENDING`, the catalog reserves stock asynchronously and replies with an event that confirms or rejects the order. No service accesses another service's database.
 
-## Arquitetura
+## Architecture
 
 ```mermaid
 flowchart LR
-    Client[Cliente] --> GW[API Gateway<br/>:8080]
+    Client[Client] --> GW[API Gateway<br/>:8080]
     GW -->|lb://catalog-service| CAT[catalog-service]
     GW -->|lb://order-service| ORD[order-service]
     ORD -->|REST + circuit breaker| CAT
-    ORD <-->|eventos| MQ[(RabbitMQ)]
-    CAT <-->|eventos| MQ
+    ORD <-->|events| MQ[(RabbitMQ)]
+    CAT <-->|events| MQ
     CAT --> DB1[(PostgreSQL<br/>catalog)]
     ORD --> DB2[(PostgreSQL<br/>orders)]
-    EUR[Eureka<br/>discovery-server] -.registro.- GW
-    EUR -.registro.- CAT
-    EUR -.registro.- ORD
+    EUR[Eureka<br/>discovery-server] -.registration.- GW
+    EUR -.registration.- CAT
+    EUR -.registration.- ORD
 ```
 
-### Saga do pedido
+### Order saga
 
 ```mermaid
 sequenceDiagram
-    participant C as Cliente
+    participant C as Client
     participant O as order-service
     participant MQ as RabbitMQ
     participant K as catalog-service
     C->>O: POST /api/orders
-    O->>K: GET /api/products/{id} (preço atual)
-    O->>O: grava pedido PENDING
+    O->>K: GET /api/products/{id} (current price)
+    O->>O: saves order as PENDING
     O-->>C: 202 Accepted
-    O->>MQ: order.created (após o commit)
+    O->>MQ: order.created (after commit)
     MQ->>K: order.created
-    K->>K: reserva estoque (tudo ou nada, idempotente)
-    alt estoque disponível
+    K->>K: reserves stock (all-or-nothing, idempotent)
+    alt stock available
         K->>MQ: stock.reserved
-        MQ->>O: pedido CONFIRMED
-    else estoque insuficiente
+        MQ->>O: order CONFIRMED
+    else insufficient stock
         K->>MQ: stock.rejected
-        MQ->>O: pedido REJECTED com motivo
+        MQ->>O: order REJECTED with reason
     end
 ```
 
-## Serviços
+## Services
 
-| Serviço | Porta | Responsabilidade |
+| Service | Port | Responsibility |
 |---|---|---|
-| `discovery-server` | 8761 | Registro de serviços (Eureka Server) |
-| `api-gateway` | 8080 | Ponto único de entrada, roteamento com balanceamento de carga (Spring Cloud Gateway) |
-| `catalog-service` | 8081 | Produtos e estoque; consome `order.created` e publica `stock.reserved` / `stock.rejected` |
-| `order-service` | 8082 | Pedidos; consulta o catálogo via REST com Resilience4j e conduz a saga |
+| `discovery-server` | 8761 | Service registry (Eureka Server) |
+| `api-gateway` | 8080 | Single entry point, load-balanced routing (Spring Cloud Gateway) |
+| `catalog-service` | 8081 | Products and stock; consumes `order.created` and publishes `stock.reserved` / `stock.rejected` |
+| `order-service` | 8082 | Orders; calls the catalog over REST with Resilience4j and drives the saga |
 
-## Decisões técnicas
+## Technical decisions
 
-- **Database per service**: cada serviço tem o próprio banco e as próprias migrations (Flyway)
-- **Eventos publicados após o commit** (`@TransactionalEventListener(AFTER_COMMIT)`), sem eventos de transações que falharam
-- **Idempotência**: o catálogo registra pedidos já processados, então uma mensagem reentregue não baixa o estoque duas vezes
-- **Reserva tudo ou nada**: se um item não tem estoque, nenhum item do pedido é reservado
-- **Lock otimista** (`@Version`) nos produtos contra atualizações concorrentes
-- **Circuit breaker** (Resilience4j) na chamada ao catálogo: com o catálogo fora do ar, a API responde `503` em vez de travar
-- **Retry + Dead Letter Queue** no consumidor: mensagens com erro vão para `catalog.order-created.dlq` após 3 tentativas
-- **Contratos de evento duplicados de propósito**: cada serviço tem a própria cópia dos records, sem biblioteca compartilhada acoplando os deploys
-- Imagens Docker multi-stage com usuário sem privilégios
+- **Database per service**: each service owns its database and its migrations (Flyway)
+- **Events published after commit** (`@TransactionalEventListener(AFTER_COMMIT)`), so failed transactions never emit events
+- **Idempotency**: the catalog records processed orders, so a redelivered message never deducts stock twice
+- **All-or-nothing reservation**: if any item is out of stock, no item in the order is reserved
+- **Optimistic locking** (`@Version`) on products against concurrent updates
+- **Circuit breaker** (Resilience4j) on the catalog call: when the catalog is down, the API returns `503` instead of hanging
+- **Retry + Dead Letter Queue** on the consumer: failing messages go to `catalog.order-created.dlq` after 3 attempts
+- **Event contracts duplicated on purpose**: each service keeps its own copy of the records, with no shared library coupling deployments
+- Multi-stage Docker images running as a non-root user
 
-## Stack
+## Tech stack
 
 Java 21 · Spring Boot 4.1 · Spring Cloud 2025.1 (Gateway, Netflix Eureka, LoadBalancer, CircuitBreaker Resilience4j) · Spring Data JPA · Hibernate · PostgreSQL 17 · Flyway · RabbitMQ 4 (Spring AMQP) · JUnit 5 · Mockito · Testcontainers · Docker Compose · GitHub Actions
 
-## Como executar
+## Getting started
 
 ```bash
 docker compose up --build
 ```
 
-Aguarde os serviços aparecerem no Eureka (http://localhost:8761). Depois:
+Wait for the services to show up in Eureka (http://localhost:8761). Then:
 
 ```bash
-# Produtos (via gateway)
+# Products (through the gateway)
 curl localhost:8080/api/products
 
-# Cria um pedido: responde 202 com status PENDING
+# Create an order: returns 202 with status PENDING
 curl -X POST localhost:8080/api/orders -H "Content-Type: application/json" \
   -d '{"customerEmail":"ana@email.com","items":[{"productId":1,"quantity":2}]}'
 
-# Consulta o pedido: CONFIRMED ou REJECTED (com o motivo)
+# Check the order: CONFIRMED or REJECTED (with the reason)
 curl localhost:8080/api/orders/1
 ```
 
-Painel do RabbitMQ: http://localhost:15672 (guest / guest).
+RabbitMQ management UI: http://localhost:15672 (guest / guest).
 
-## Testes
+## Tests
 
 ```bash
 ./mvnw verify
 ```
 
-- `catalog-service`: `StockReservationIntegrationTest` usa PostgreSQL e RabbitMQ em containers e valida reserva, rejeição por falta de estoque e idempotência com mensagem duplicada
-- `order-service`: `OrderSagaIntegrationTest` valida o fluxo `PENDING → CONFIRMED`, `PENDING → REJECTED` e o `503` quando o catálogo está indisponível; `OrderTest` cobre as regras do domínio
+- `catalog-service`: `StockReservationIntegrationTest` uses containerized PostgreSQL and RabbitMQ to verify reservation, rejection due to insufficient stock, and idempotency with a duplicated message
+- `order-service`: `OrderSagaIntegrationTest` verifies the `PENDING → CONFIRMED` and `PENDING → REJECTED` flows and the `503` when the catalog is unavailable; `OrderTest` covers the domain rules
 
-O GitHub Actions roda todos os testes e gera a imagem Docker de cada serviço.
+GitHub Actions runs all tests and builds a Docker image for each service.
 
-## Autor
+## Author
 
-**André Souza** · Desenvolvedor Java Back-end
+**André Souza** · Back-end Software Engineer (Java)
 [LinkedIn](https://www.linkedin.com/in/andre-souza-ti) · [GitHub](https://github.com/AndreSouzaTI)
